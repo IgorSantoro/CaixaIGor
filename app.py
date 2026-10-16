@@ -4,29 +4,40 @@ Painel Tributário — IRPJ e CSLL
 
 Como usar
 ---------
-Coloque na mesma pasta deste arquivo os relatórios de pagamento:
+Coloque na mesma pasta deste arquivo UMA base com todos os pagamentos:
 
-    base1.xls  ->  1º trimestre de apuração
-    base2.xls  ->  2º trimestre
-    base3.xls  ->  3º trimestre
-    base4.xls  ->  4º trimestre
+    base.xls   (ou base.xlsx)
 
-Suba só os trimestres que já existirem; o painel se ajusta sozinho.
-Também aceita .xlsx. O trimestre vem do ARQUIVO, não da data de pagamento —
-a apuração do 1º tri é recolhida em abril, que já é o 2º tri do calendário.
+Pode ser um período longo, por exemplo de jan/2025 a dez/2026. O painel
+separa sozinho por exercício e por trimestre de APURAÇÃO (competência).
+
+Como o trimestre é definido
+---------------------------
+1. Se a base tiver uma coluna de competência/período de apuração (qualquer
+   nome listado em COLUNAS_COMPETENCIA), ela manda.
+2. Se não tiver (ou a linha estiver vazia), a competência é deduzida da data
+   de pagamento, conforme o tipo do código (REGRA_POR_CODIGO):
+     - estimativa mensal (2362, 2484): competência = mês anterior ao pagamento
+           pago em fev/2025 -> jan/2025 -> 1º tri de 2025
+           pago em jan/2026 -> dez/2025 -> 4º tri de 2025
+     - trimestral (2089, 2372): competência = trimestre anterior ao pagamento
+           pago em abr, mai ou jun/2025 (cotas) -> 1º tri de 2025
+           pago em jan, fev ou mar/2026          -> 4º tri de 2025
+   Pagamento em atraso foge dessa regra — por isso o painel avisa quando há
+   lançamento com multa/juros cuja competência foi deduzida pela data.
 
 Atualização automática
 ----------------------
-O painel confere a data de modificação das bases a cada SEGUNDOS_VERIFICACAO
-segundos. Se algum arquivo foi salvo, entrou ou saiu da pasta, a página
-recarrega sozinha com os dados novos — sem F5 e sem limpar cache.
+O painel confere a data de modificação da base a cada SEGUNDOS_VERIFICACAO
+segundos. Se o arquivo foi salvo, entrou ou saiu da pasta, a página recarrega
+sozinha com os dados novos — sem F5 e sem limpar cache.
 
 Sobre o ícone de olho
 ---------------------
 A tabela é HTML, e HTML dentro do Streamlit não consegue chamar função Python
 diretamente. O olho é um link que recarrega a página com ?empresa=... — e ele
-leva junto a seção, o período e os filtros ativos, para que nada se perca
-quando o painel de detalhe abre.
+leva junto o exercício, a seção, o período e os filtros ativos, para que nada
+se perca quando o painel de detalhe abre.
 """
 
 import html
@@ -67,18 +78,30 @@ GRUPOS["ESA"] = sorted({cod for lista in GRUPOS.values() for cod in lista})
 # Códigos DARF considerados. Qualquer outro código é descartado.
 IMPOSTO_POR_CODIGO = {"2362": "IRPJ", "2089": "IRPJ", "2484": "CSLL", "2372": "CSLL"}
 
+# Como deduzir a competência pela data de pagamento, quando a base não traz.
+#   "mensal"     -> mês anterior ao pagamento
+#   "trimestral" -> trimestre anterior ao pagamento
+# Código fora da lista é tratado como trimestral.
+REGRA_POR_CODIGO = {"2362": "mensal", "2484": "mensal",
+                    "2089": "trimestral", "2372": "trimestral"}
+
+# Nomes de coluna aceitos como competência / período de apuração
+# (comparação sem diferenciar maiúsculas). A primeira encontrada é usada.
+COLUNAS_COMPETENCIA = ["dat_apuracao", "dat_periodo_apuracao", "periodo_apuracao",
+                       "per_apuracao", "dat_competencia", "competencia"]
+
 # Colunas de valor, na ordem em que aparecem nas exportações.
 VALORES = ["vlr_principal", "vlr_multa", "vlr_juro_encargo",
            "vlr_outra_entidade", "vlr_total"]
 
-# Deixe None para inferir o exercício pelas datas de pagamento.
+# Exercício aberto ao iniciar. None = o mais recente presente na base.
 EXERCICIO = None
 
-# Intervalo (em segundos) da verificação de arquivos novos ou alterados.
+# Intervalo (em segundos) da verificação de arquivo novo ou alterado.
 SEGUNDOS_VERIFICACAO = 5
 
 PASTA = os.path.dirname(os.path.abspath(__file__))
-ARQUIVOS = {t: [f"base{t}.xls", f"base{t}.xlsx"] for t in (1, 2, 3, 4)}
+ARQUIVO_BASE = ["base.xls", "base.xlsx"]
 NOME_TRI = {1: "1º trimestre", 2: "2º trimestre",
             3: "3º trimestre", 4: "4º trimestre"}
 SECOES = ["Empresas", "Consolidados"]
@@ -216,6 +239,7 @@ a.olho:focus-visible { outline:2px solid var(--blue); outline-offset:2px; }
         background:var(--card); border:1px solid var(--line); color:#33415A !important; }
 .chip.on { background:#0C2A1B; border-color:#1B4A32; color:var(--green) !important; }
 .legenda { font-size:.66rem; color:var(--mut) !important; margin-top:8px; line-height:1.5; }
+.legenda b { color:var(--dim) !important; }
 .aviso { font-size:.66rem; color:var(--amber) !important; margin-top:10px; line-height:1.5;
          border-left:2px solid #3A2A0D; padding-left:8px; }
 
@@ -382,8 +406,8 @@ def mostrar_cartoes(r, rotulo_total="Total pago", encargos=True):
 
 
 def link_olho(empresa, contexto):
-    """Monta o link da coluna Ações. Leva junto seção, período e filtros para
-    que a tela volte exatamente como estava depois que o painel abrir."""
+    """Monta o link da coluna Ações. Leva junto exercício, seção, período e
+    filtros para que a tela volte exatamente como estava."""
     parametros = {"empresa": str(empresa)}
     parametros.update({c: v for c, v in contexto.items() if v})
     consulta = "&".join(f"{c}={quote(str(v))}" for c, v in parametros.items())
@@ -473,7 +497,7 @@ def corpo_detalhe(empresa, dados, periodo_texto, sufixo, ano_completo):
     c4.metric("Outras entidades", f"R$ {moeda(dados['vlr_outra_entidade'].sum())}")
 
     if ano_completo and dados["Trimestre"].nunique() > 1:
-        st.markdown('<div class="sec">Por trimestre</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec">Por trimestre de apuração</div>', unsafe_allow_html=True)
         por_tri = (dados.groupby("Trimestre")["vlr_total"].sum()
                         .rename(index=NOME_TRI).reset_index())
         por_tri.columns = ["Trimestre", "vlr_total"]
@@ -481,9 +505,12 @@ def corpo_detalhe(empresa, dados, periodo_texto, sufixo, ano_completo):
                      use_container_width=True, hide_index=True)
 
     st.markdown(f'<div class="sec">{len(dados)} lançamentos</div>', unsafe_allow_html=True)
-    lancamentos = dados[["dat_pagamento", "cod_pagamento", "Imposto"] + VALORES].copy()
-    lancamentos = lancamentos.sort_values("dat_pagamento")
+    lancamentos = dados[["dat_pagamento", "competencia", "cod_pagamento", "Imposto"]
+                        + VALORES].copy()
+    lancamentos = lancamentos.sort_values(["competencia", "dat_pagamento"])
     lancamentos["dat_pagamento"] = lancamentos["dat_pagamento"].dt.strftime("%d/%m/%Y")
+    lancamentos["competencia"] = lancamentos["competencia"].dt.strftime("%m/%Y")
+    lancamentos = lancamentos.rename(columns={"competencia": "Competência"})
     st.dataframe(lancamentos.style.format({v: moeda_col for v in VALORES}),
                  use_container_width=True, hide_index=True)
 
@@ -537,11 +564,10 @@ def caminho_de(nomes):
 
 
 def assinatura_bases():
-    """Retrato das bases presentes na pasta: (arquivo, data de modificação).
-    Muda quando um arquivo é salvo, incluído ou removido."""
-    nomes = [n for lista in ARQUIVOS.values() for n in lista] + ["base.xls", "base.xlsx"]
+    """Retrato da base na pasta: (arquivo, data de modificação).
+    Muda quando o arquivo é salvo, incluído ou removido."""
     retrato = []
-    for nome in nomes:
+    for nome in ARQUIVO_BASE:
         p = os.path.join(PASTA, nome)
         try:
             retrato.append((nome, os.path.getmtime(p)))
@@ -565,38 +591,85 @@ def ler_com_aviso(caminho):
 
 
 def carregar():
-    """Lê base1..base4. Cai para base.xls (trimestre pela data) se não achar nenhum."""
-    partes, trimestres = [], []
-    for tri, nomes in ARQUIVOS.items():
-        caminho = caminho_de(nomes)
-        if caminho:
-            parte = ler_com_aviso(caminho)
-            parte["Trimestre"] = tri
-            partes.append(parte)
-            trimestres.append(tri)
-
-    if partes:
-        return pd.concat(partes, ignore_index=True), trimestres, True
-
-    legado = caminho_de(["base.xls", "base.xlsx"])
-    if not legado:
-        st.error("Nenhuma base encontrada. Coloque base1.xls (e os demais trimestres) "
+    """Lê a base única (base.xls ou base.xlsx)."""
+    caminho = caminho_de(ARQUIVO_BASE)
+    if not caminho:
+        st.error("Nenhuma base encontrada. Coloque base.xls (ou base.xlsx) "
                  "nesta mesma pasta.")
         st.stop()
-    return ler_com_aviso(legado), [], False
+    return ler_com_aviso(caminho)
 
 
-def tratar(df, por_arquivo):
-    """Descarta cancelados, mantém só IRPJ/CSLL e normaliza tipos."""
+def _converter(serie, dia_primeiro):
+    # pandas antigo não conhece format='mixed'; cai para a conversão simples.
+    try:
+        return pd.to_datetime(serie, dayfirst=dia_primeiro, errors="coerce", format="mixed")
+    except (TypeError, ValueError):
+        return pd.to_datetime(serie, dayfirst=dia_primeiro, errors="coerce")
+
+
+def para_data(serie):
+    """Converte para data aceitando formatos misturados na mesma coluna.
+    Texto brasileiro (31/03/2025) é lido dia-primeiro; texto ISO (2025-03-31)
+    e data do Excel são lidos como ano-mês-dia — com dia-primeiro, 2025-10-01
+    viraria 10 de janeiro."""
+    iso = serie.astype(str).str.strip().str.match(r"^\d{4}-\d{2}-\d{2}")
+    datas = _converter(serie.where(~iso), True)
+    if iso.any():
+        datas[iso] = _converter(serie[iso], False)
+    return datas
+
+
+def ler_competencia(serie):
+    """Converte a coluna de competência da base em período mensal.
+    Aceita data (01/03/2025, 31/03/2025, datetime do Excel) ou 'mm/aaaa'."""
+    texto = serie.astype(str).str.strip()
+    mm_aaaa = texto.str.extract(r"^(\d{1,2})[/-](\d{4})$")
+    eh_mm_aaaa = mm_aaaa[0].notna()
+
+    datas = para_data(serie.where(~eh_mm_aaaa))
+    if eh_mm_aaaa.any():
+        datas[eh_mm_aaaa] = pd.to_datetime(
+            mm_aaaa.loc[eh_mm_aaaa, 1] + "-" + mm_aaaa.loc[eh_mm_aaaa, 0].str.zfill(2) + "-01",
+            errors="coerce")
+    return datas.dt.to_period("M")
+
+
+def competencia_pela_regra(df):
+    """Deduz a competência pela data de pagamento e pelo tipo do código."""
+    pagamento = df["dat_pagamento"]
+    regra = df["cod_pagamento"].map(REGRA_POR_CODIGO).fillna("trimestral")
+    mensal = pagamento.dt.to_period("M") - 1
+    trimestral = (pagamento.dt.to_period("Q") - 1).dt.asfreq("M", how="end")
+    return mensal.where(regra == "mensal", trimestral)
+
+
+def definir_competencia(df):
+    """Usa a coluna de competência da base quando existir; o que faltar é
+    deduzido pela data. Retorna (competência, coluna usada, linhas deduzidas)."""
+    deduzida = competencia_pela_regra(df)
+    por_nome = {str(c).strip().lower(): c for c in df.columns}
+    coluna = next((por_nome[c] for c in COLUNAS_COMPETENCIA if c in por_nome), None)
+    if coluna is None:
+        return deduzida, None, pd.Series(True, index=df.index)
+
+    lida = ler_competencia(df[coluna])
+    faltou = lida.isna()
+    return lida.where(~faltou, deduzida), coluna, faltou
+
+
+def tratar(df):
+    """Descarta cancelados, mantém só IRPJ/CSLL, normaliza tipos e define
+    exercício e trimestre de apuração de cada lançamento."""
     if "dsc_situacao" in df.columns:
         situacao = df["dsc_situacao"].astype(str).str.upper().str.strip()
         df = df[~situacao.str.startswith("CANCELAD")]
 
+    df = df.copy()
     for coluna in ["cod_pagamento", "dat_pagamento", "cf_empresa"] + VALORES:
         if coluna not in df.columns:
             df[coluna] = 0
 
-    df = df.copy()
     df["cod_pagamento"] = (df["cod_pagamento"].astype(str).str.strip()
                              .str.replace(r"\.0$", "", regex=True))
     df = df[df["cod_pagamento"].isin(IMPOSTO_POR_CODIGO)].copy()
@@ -606,20 +679,30 @@ def tratar(df, por_arquivo):
     for coluna in VALORES:
         df[coluna] = pd.to_numeric(df[coluna], errors="coerce").fillna(0)
 
-    df["dat_pagamento"] = pd.to_datetime(df["dat_pagamento"], dayfirst=True, errors="coerce")
+    df["dat_pagamento"] = para_data(df["dat_pagamento"])
     sem_data = int(df["dat_pagamento"].isna().sum())
-    df = df.dropna(subset=["dat_pagamento"])
+    df = df.dropna(subset=["dat_pagamento"]).copy()
 
-    if not por_arquivo:
-        df["Trimestre"] = df["dat_pagamento"].dt.quarter
-    return df, sem_data
+    competencia, coluna, deduzidas = definir_competencia(df)
+    df["competencia"] = competencia
+    df["Exercicio"] = competencia.dt.year.astype(int)
+    df["Trimestre"] = competencia.dt.quarter.astype(int)
+
+    com_encargo = (df["vlr_multa"] > 0) | (df["vlr_juro_encargo"] > 0)
+    info = {
+        "sem_data": sem_data,
+        "coluna": coluna,
+        "deduzidas": int(deduzidas.sum()),
+        "deduzidas_com_encargo": int((deduzidas & com_encargo).sum()),
+    }
+    return df, info
 
 
 # =========================================================================
 # ATUALIZAÇÃO AUTOMÁTICA
 # =========================================================================
-# Um fragmento roda sozinho a cada SEGUNDOS_VERIFICACAO segundos e compara as
-# datas de modificação com as da carga atual. Só recarrega a página quando
+# Um fragmento roda sozinho a cada SEGUNDOS_VERIFICACAO segundos e compara a
+# data de modificação com a da carga atual. Só recarrega a página quando
 # algo mudou — no resto do tempo é uma checagem de milissegundos.
 
 def _vigiar_bases(assinatura_carregada):
@@ -629,7 +712,7 @@ def _vigiar_bases(assinatura_carregada):
         except TypeError:          # Streamlit antigo: rerun sem escopo
             st.rerun()
     st.markdown(
-        f'<div class="legenda">Bases conferidas às '
+        f'<div class="legenda">Base conferida às '
         f'{datetime.now():%H:%M:%S} · atualização automática a cada '
         f'{SEGUNDOS_VERIFICACAO}s</div>', unsafe_allow_html=True)
 
@@ -640,30 +723,28 @@ if _fragmento:
 else:
     def vigiar_bases(_assinatura):
         st.markdown('<div class="legenda">Atualize a página (F5) depois de salvar '
-                    'uma base — esta versão do Streamlit não recarrega sozinha.</div>',
+                    'a base — esta versão do Streamlit não recarrega sozinha.</div>',
                     unsafe_allow_html=True)
 
 
-# A assinatura é tirada ANTES da leitura: se um arquivo for salvo no meio da
+# A assinatura é tirada ANTES da leitura: se o arquivo for salvo no meio da
 # carga, a próxima conferência percebe e recarrega de novo.
 ASSINATURA_CARREGADA = assinatura_bases()
-bruto, tris_carregados, POR_ARQUIVO = carregar()
-df, sem_data = tratar(bruto, POR_ARQUIVO)
+df, info = tratar(carregar())
 
 if df.empty:
     st.error("A base foi lida, mas nenhum pagamento de IRPJ ou CSLL sobrou após o "
              "tratamento. Confira os códigos de receita e a coluna de situação.")
     st.stop()
 
-anos = sorted(df["dat_pagamento"].dt.year.unique())
-exercicio = EXERCICIO or int(df["dat_pagamento"].dt.year.mode()[0])
 sem_codigo = int(df["cod_empresa"].isna().sum())
+exercicios = sorted(df["Exercicio"].unique().tolist())
 
 
 # =========================================================================
 # ESTADO VINDO DO LINK DO OLHO
 # =========================================================================
-# O olho recarrega a página com ?empresa=...&sec=...&p=...&q=...&imp=...&g=...
+# O olho recarrega a página com ?empresa=...&ex=...&sec=...&p=...&q=...&imp=...&g=...
 # Lemos tudo aqui, guardamos em variáveis e limpamos a URL — assim a janela
 # não reabre sozinha nas próximas interações.
 
@@ -677,6 +758,10 @@ periodo_inicial = _url.get("p")
 busca_inicial = _url.get("q", "")
 grupo_inicial = _url.get("g")
 impostos_iniciais = [i for i in _url.get("imp", "IRPJ,CSLL").split(",") if i] or ["IRPJ", "CSLL"]
+try:
+    exercicio_inicial = int(_url["ex"])
+except (KeyError, ValueError):
+    exercicio_inicial = EXERCICIO or exercicios[-1]
 
 
 # =========================================================================
@@ -687,31 +772,29 @@ with st.sidebar:
     st.markdown(
         '<div class="marca"><div class="sigla">IR</div>'
         '<div><div class="nome">Painel Tributário</div>'
-        f'<div class="sub">IRPJ e CSLL · exercício {exercicio}</div></div></div>',
+        '<div class="sub">IRPJ e CSLL · por competência</div></div></div>',
         unsafe_allow_html=True)
 
-    if POR_ARQUIVO:
-        opcoes = ["Ano completo"] + [NOME_TRI[t] for t in sorted(tris_carregados)]
-    else:
-        st.markdown('<div class="rot-lateral">Ano de pagamento</div>', unsafe_allow_html=True)
-        ano_legado = st.selectbox("Ano de pagamento", anos, index=len(anos) - 1,
-                                  label_visibility="collapsed")
-        df = df[df["dat_pagamento"].dt.year == ano_legado]
-        exercicio = ano_legado
-        opcoes = ["Ano completo"] + [NOME_TRI[t] for t in
-                                     sorted(df["Trimestre"].dropna().unique())]
+    st.markdown('<div class="rot-lateral">Exercício (ano de apuração)</div>',
+                unsafe_allow_html=True)
+    exercicio = st.selectbox("Exercício", exercicios,
+                             index=posicao(exercicios, exercicio_inicial, len(exercicios) - 1),
+                             label_visibility="collapsed")
+    df_ex = df[df["Exercicio"] == exercicio]
+    tris_presentes = sorted(df_ex["Trimestre"].unique().tolist())
 
+    opcoes = ["Ano completo"] + [NOME_TRI[t] for t in tris_presentes]
     st.markdown('<div class="rot-lateral">Período</div>', unsafe_allow_html=True)
     periodo = st.radio("Período", opcoes, index=posicao(opcoes, periodo_inicial),
                        label_visibility="collapsed")
 
     if periodo == "Ano completo":
-        recorte = df
+        recorte = df_ex
         rotulo_periodo = f"todos os trimestres de {exercicio}"
         sufixo_arquivo = f"{exercicio}_ano"
     else:
         numero = next(n for n, texto in NOME_TRI.items() if texto == periodo)
-        recorte = df[df["Trimestre"] == numero]
+        recorte = df_ex[df_ex["Trimestre"] == numero]
         rotulo_periodo = f"{periodo} de {exercicio}"
         sufixo_arquivo = f"{exercicio}_Q{numero}"
 
@@ -724,26 +807,34 @@ with st.sidebar:
         f'<div class="v t">{r_periodo["empresas"]}</div></div>',
         unsafe_allow_html=True)
 
-    st.markdown('<div class="rot-lateral">Trimestres no sistema</div>', unsafe_allow_html=True)
-    if POR_ARQUIVO:
-        chips = "".join(
-            f'<div class="chip{" on" if t in tris_carregados else ""}">Q{t}</div>'
-            for t in (1, 2, 3, 4))
-        st.markdown(f'<div class="chips">{chips}</div>', unsafe_allow_html=True)
-        pendentes = [f"Q{t}" for t in (1, 2, 3, 4) if t not in tris_carregados]
-        if pendentes:
-            st.markdown(
-                f'<div class="legenda">Falta enviar: {", ".join(pendentes)}. '
-                f'Copie o arquivo para a pasta do painel e ele aparece aqui.</div>',
+    st.markdown(f'<div class="rot-lateral">Trimestres de {exercicio} na base</div>',
                 unsafe_allow_html=True)
+    chips = "".join(
+        f'<div class="chip{" on" if t in tris_presentes else ""}">Q{t}</div>'
+        for t in (1, 2, 3, 4))
+    st.markdown(f'<div class="chips">{chips}</div>', unsafe_allow_html=True)
+    pendentes = [f"Q{t}" for t in (1, 2, 3, 4) if t not in tris_presentes]
+    if pendentes:
+        st.markdown(f'<div class="legenda">Sem pagamento na base: {", ".join(pendentes)}.</div>',
+                    unsafe_allow_html=True)
+
+    if info["coluna"]:
+        origem = (f'Trimestre definido pela coluna <b>{esc(info["coluna"])}</b> da base.')
+        if info["deduzidas"]:
+            origem += (f' {info["deduzidas"]} linha(s) sem competência preenchida '
+                       f'foram deduzidas pela data de pagamento.')
     else:
-        st.markdown(
-            '<div class="legenda">Lendo base.xls — o trimestre está sendo deduzido '
-            'da data de pagamento.</div>', unsafe_allow_html=True)
+        origem = ('Trimestre deduzido pela data de pagamento: estimativa mensal '
+                  '(2362/2484) = mês anterior; trimestral (2089/2372) = trimestre anterior.')
+    st.markdown(f'<div class="legenda">{origem}</div>', unsafe_allow_html=True)
 
     alertas = []
-    if sem_data:
-        alertas.append(f"{sem_data} lançamento(s) sem data válida foram ignorados.")
+    if info["sem_data"]:
+        alertas.append(f"{info['sem_data']} lançamento(s) sem data válida foram ignorados.")
+    if info["deduzidas_com_encargo"]:
+        alertas.append(f"{info['deduzidas_com_encargo']} lançamento(s) com multa/juros "
+                       f"tiveram a competência deduzida pela data — se foram pagos em "
+                       f"atraso, podem estar no trimestre errado.")
     if sem_codigo:
         alertas.append(f"{sem_codigo} lançamento(s) sem código de empresa ficam fora "
                        f"dos consolidados.")
@@ -759,7 +850,7 @@ with st.sidebar:
 
 st.markdown(
     f'<div class="head"><h1>Pagamentos de IRPJ e CSLL</h1>'
-    f'<div class="escopo">Mostrando <b>{esc(rotulo_periodo)}</b> — '
+    f'<div class="escopo">Mostrando <b>{esc(rotulo_periodo)}</b> por competência — '
     f'{len(recorte)} lançamentos de {recorte["cf_empresa"].nunique()} empresas.</div></div>',
     unsafe_allow_html=True)
 
@@ -800,7 +891,8 @@ if secao == "Empresas":
     st.markdown(f'<div class="sec">{len(tabela)} empresas · maior pagador primeiro · '
                 f'o olho abre o detalhe</div>', unsafe_allow_html=True)
     mostrar_tabela(tabela, contexto={
-        "sec": "Empresas", "p": periodo, "q": busca, "imp": ",".join(impostos)})
+        "ex": exercicio, "sec": "Empresas", "p": periodo,
+        "q": busca, "imp": ",".join(impostos)})
 
 
 # ─── CONSOLIDADOS ────────────────────────────────────────────────────────
@@ -853,7 +945,7 @@ else:
                            f"{grupo.lower().replace(' ', '_')}_{sufixo_arquivo}.xlsx",
                            "exp_grupo", "Consolidado")
         mostrar_tabela(agregar(dados_grupo), contexto={
-            "sec": "Consolidados", "p": periodo, "g": grupo})
+            "ex": exercicio, "sec": "Consolidados", "p": periodo, "g": grupo})
 
 
 # ─── PAINEL DE DETALHE (disparado pelo olho) ─────────────────────────────
@@ -863,5 +955,5 @@ if pedido_detalhe:
         st.warning(f"{pedido_detalhe} não tem pagamento em {rotulo_periodo}.")
     else:
         abrir_detalhe(pedido_detalhe, dados_empresa,
-                      f"Pagamentos em {rotulo_periodo}",
+                      f"Pagamentos da competência {rotulo_periodo}",
                       sufixo_arquivo, periodo == "Ano completo")
